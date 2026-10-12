@@ -172,6 +172,24 @@ def best_threshold(scores, labels):
     return best
 
 
+def probe_workers(nw):
+    """探测多进程是否可用；不可用(如受限沙箱)则回退到单进程 workers=0。
+
+    DataLoader 在 Windows 上通过 spawn + 命名管道工作，受限环境会拒绝创建管道。
+    这里只做一次轻量探测，避免真正建 DataLoader 留下半初始化的迭代器。
+    """
+    if nw <= 0:
+        return 0
+    import multiprocessing as mp
+    try:
+        q = mp.get_context('spawn').SimpleQueue()
+        q.close()
+        return nw
+    except Exception as e:
+        print(f'[warn] 多进程图片解码不可用 ({type(e).__name__})，回退到单进程 workers=0')
+        return 0
+
+
 def load_model(ckpt, device):
     model = RITA(num_classes=4)
     ck = torch.load(ckpt, map_location='cpu')
@@ -257,10 +275,11 @@ def main():
     print(f'[data] {len(items)} 张')
 
     ds = ImageListDataset(items, tf)
+    pin = (device.type == 'cuda')
+    nw = probe_workers(args.workers)
     loader = torch.utils.data.DataLoader(
         ds, batch_size=args.batch, shuffle=False,
-        num_workers=args.workers, pin_memory=(device.type == 'cuda'),
-        persistent_workers=(args.workers > 0),
+        num_workers=nw, pin_memory=pin, persistent_workers=(nw > 0),
     )
 
     rows, done, t_start = [], 0, time.time()
