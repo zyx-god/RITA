@@ -9,7 +9,7 @@
   python make_subset.py --root "C:\\Users\\86186\\Desktop\\dataset_classified" \
                         --out "D:\\rita_subset" --per_split 20
 """
-import os, argparse, random, shutil
+import os, argparse, random, shutil, zipfile
 
 EXTS = ('.jpg', '.jpeg', '.png', '.bmp', '.webp', '.tif', '.tiff')
 
@@ -35,6 +35,8 @@ def main():
     ap.add_argument('--per_split', type=int, default=20,
                     help='每个生成器每个 split(Real/Fake) 抽多少张')
     ap.add_argument('--seed', type=int, default=0)
+    ap.add_argument('--zip', action='store_true',
+                    help='同时打包成 zip (用 Python zipfile，条目名保证是正斜杠)')
     args = ap.parse_args()
 
     rng = random.Random(args.seed)
@@ -79,8 +81,31 @@ def main():
     print('-' * 40)
     print(f'合计 {total} 张, {total_bytes/1024**2:.1f} MB')
     print(f'输出目录: {args.out}')
-    print('\n下一步打包:')
-    print(f'  Compress-Archive -Path "{args.out}\\*" -DestinationPath "D:\\rita_subset.zip"')
+
+    if args.zip:
+        zip_path = args.out.rstrip('\\/') + '.zip'
+        if os.path.exists(zip_path):
+            os.remove(zip_path)
+        # 注意: 必须用 zipfile 而不是 PowerShell 的 Compress-Archive，
+        # 后者的实现在 Windows 上会把反斜杠写进条目名，Kaggle 会拒收。
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED, compresslevel=1) as z:
+            for dp, _, fns in os.walk(args.out):
+                for f in sorted(fns):
+                    full = os.path.join(dp, f)
+                    rel = os.path.relpath(full, args.out).replace(os.sep, '/')
+                    z.write(full, rel)
+        with zipfile.ZipFile(zip_path) as z:
+            names = z.namelist()
+            bad = [x for x in names if '\\' in x]
+        size_mb = os.path.getsize(zip_path) / 1024 ** 2
+        print(f'\n已打包: {zip_path}')
+        print(f'  条目数 {len(names)}, 大小 {size_mb:.1f} MB, 含反斜杠条目 {len(bad)}')
+        print(f'  前 3 条: {names[:3]}')
+        assert not bad, 'zip 条目名里出现反斜杠，上传会被 Kaggle 拒绝'
+        print('  OK — 可以直接上传')
+    else:
+        print('\n下次可以直接加 --zip 打包，例如:')
+        print(f'  python make_subset.py --root <数据集> --out "{args.out}" --per_split 20 --zip')
 
 
 if __name__ == '__main__':
