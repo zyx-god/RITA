@@ -1,0 +1,1 @@
+torchrun --nproc_per_node=8 --master_port=29505 test_robustness.py --ckpt [ckpt_path]

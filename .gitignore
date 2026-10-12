@@ -1,0 +1,5 @@
+*.vscode
+*.pth
+results
+__*preds*.csv
+__pycache__/
