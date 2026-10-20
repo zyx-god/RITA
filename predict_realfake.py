@@ -40,7 +40,9 @@ def ar_infer_batch(model, images, max_steps=3, eos_ratio=0.9, amp=True):
     """images: (B,3,512,512) 已归一化。
 
     AR 的每一步在 batch 内并行；已经输出 EOS 的样本被冻结，不再更新其 mask。
-    返回 (step0_stats, steps_taken)，step0_stats 是各统计量的 (B,) 张量。
+    返回 (step0_stats, steps_taken, final_eos)，均为 (B,) 张量。
+  final_eos = 该样本最后一步预测为 EOS 的像素占比；接近 1 说明序列正常终止，
+  远小于 1 说明没收敛(被 max_steps 截断)。
 
     第 0 步输出的语义是"哪些像素被篡改"(类别 0)，压成标量即为 image-level 假图分数。
     """
@@ -55,6 +57,7 @@ def ar_infer_batch(model, images, max_steps=3, eos_ratio=0.9, amp=True):
     iter_val = 0.0
     active = torch.ones(B, dtype=torch.bool, device=dev)
     steps_taken = torch.zeros(B, dtype=torch.long, device=dev)
+    final_eos = torch.zeros(B, dtype=torch.float32, device=dev)
     step0 = None
 
     use_amp = amp and dev.type == 'cuda'
@@ -82,6 +85,7 @@ def ar_infer_batch(model, images, max_steps=3, eos_ratio=0.9, amp=True):
                 'p_tamper_p95': torch.quantile(p_tamper.flatten(1), 0.95, dim=1).cpu(),
             }
 
+        final_eos[active] = eos_frac[active]     # 该样本最后一步的 EOS 占比
         steps_taken[active] = k + 1
         active = active & (eos_frac < eos_ratio)
         if not bool(active.any()):
@@ -89,7 +93,7 @@ def ar_infer_batch(model, images, max_steps=3, eos_ratio=0.9, amp=True):
         current_mask[active] = pred[active]
         iter_val += 1.0
 
-    return step0, steps_taken
+    return step0, steps_taken, final_eos.cpu()
 
 
 class ImageListDataset(torch.utils.data.Dataset):
@@ -264,7 +268,7 @@ def main():
 
     if args.single:
         x = tf(Image.open(args.single).convert('RGB')).unsqueeze(0).to(device)
-        s0, _ = ar_infer_batch(model, x, args.max_steps, args.eos_ratio, not args.no_amp)
+        s0, _, _ = ar_infer_batch(model, x, args.max_steps, args.eos_ratio, not args.no_amp)
         th = args.threshold if args.threshold is not None else 0.5
         print(f"{args.single}\n  判定: {'FAKE' if s0['tamper_ratio'][0] > th else 'REAL'}"
               f"  p_tamper_mean={s0['p_tamper_mean'][0]:.4f}"
@@ -285,7 +289,7 @@ def main():
     rows, done, t_start = [], 0, time.time()
     for idxs, xs, errs in loader:
         xs = xs.to(device, non_blocking=True)
-        s0, steps = ar_infer_batch(model, xs, args.max_steps, args.eos_ratio, not args.no_amp)
+        s0, steps, final_eos = ar_infer_batch(model, xs, args.max_steps, args.eos_ratio, not args.no_amp)
         for j, i in enumerate(idxs.tolist()):
             done += 1
             if errs[j]:
@@ -299,6 +303,7 @@ def main():
                 'tamper_ratio': s0['tamper_ratio'][j].item(),
                 'p_tamper_p95': s0['p_tamper_p95'][j].item(),
                 'n_steps': int(steps[j]),
+                'final_eos_frac': final_eos[j].item(),
             })
         if done % (args.batch * 4) < args.batch or done == len(items):
             el = time.time() - t_start
